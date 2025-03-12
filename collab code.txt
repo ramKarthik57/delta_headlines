@@ -1,0 +1,87 @@
+import cv2
+import pytesseract
+from transformers import pipeline
+from gtts import gTTS
+import os
+import time
+import random
+from google.colab import drive
+
+def mount_drive():
+    drive.mount('/content/drive')
+
+def extract_text_from_image(image_path):
+    image = cv2.imread(image_path)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    text = pytesseract.image_to_string(gray).strip()
+
+    if not text:
+        print(f"Warning: No text extracted from {image_path}. Skipping...")
+        return None
+
+    return text
+
+def summarize_text(text):
+    words = text.split()
+
+    if len(words) > 1024:
+        print("⚠️ Text too long, truncating before summarization...")
+        text = " ".join(words[:1024])
+
+    summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+    try:
+        summary = summarizer(text, max_length=min(len(words), 150), min_length=50, do_sample=False)
+        return summary[0]['summary_text']
+    except Exception as e:
+        print(f"❌ Summarization failed: {e}")
+        return text
+
+def text_to_speech(text, output_audio):
+    retries = 3  # Retry up to 3 times if rate-limited
+    delay = 5  # Start with 5 seconds delay
+
+    for attempt in range(retries):
+        try:
+            tts = gTTS(text=text, lang='en')
+            tts.save(output_audio)
+            print(f"✅ Audio saved: {output_audio}")
+            os.system(f"mpg321 {output_audio}")  # Use 'mpg321' or 'afplay' for Mac
+            return
+        except Exception as e:
+            print(f"❌ TTS API error: {e}")
+            if "429" in str(e):  # Rate limit error
+                wait_time = delay * (2 ** attempt) + random.randint(1, 5)  # Exponential backoff
+                print(f"⏳ Waiting {wait_time} seconds before retrying...")
+                time.sleep(wait_time)
+            else:
+                break  # Stop retrying for other errors
+
+def process_images(image_folder, output_folder):
+    os.makedirs(output_folder, exist_ok=True)
+    images = [f for f in os.listdir(image_folder) if f.endswith(('.jpg', '.png', '.jpeg'))]
+
+    if not images:
+        print("No valid images found in the folder.")
+        return
+
+    for img in images:
+        image_path = os.path.join(image_folder, img)
+        extracted_text = extract_text_from_image(image_path)
+
+        if not extracted_text:
+            continue
+
+        summarized_text = summarize_text(extracted_text)
+        print(f"Processed: {img}")
+
+        audio_path = os.path.join(output_folder, f"{os.path.splitext(img)[0]}.mp3")
+        text_to_speech(summarized_text, audio_path)
+
+        time.sleep(5)  # Add a delay to prevent hitting API limits
+
+if __name__ == "__main__":
+    mount_drive()
+    image_folder = "/content/drive/My Drive/Delta_Headlines"
+    output_folder = "/content/drive/My Drive/news_audio"
+    process_images(image_folder, output_folder)
